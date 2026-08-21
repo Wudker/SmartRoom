@@ -1,5 +1,5 @@
 #pragma once
-#define LED_STRIP_PIN 7
+#define LED_STRIP_PIN 10
 #define LAMP_PIN 8
 #define MAIN_LIGHT_PIN 9
 

@@ -62,7 +62,7 @@ void connectMqtt()
 
 		}
 		else {
-            if(WiFi.status() != WL_CONNECTED){
+            if(WiFi.status() != WL_CONNECTED){                  
                 Serial.println("WiFi not connected, reconnecting...");
                 WiFi.reconnect();
                 delay(1000);

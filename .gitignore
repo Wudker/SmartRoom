@@ -1,1 +1,3 @@
 Software/SmartRoom/src/Secret_keys.cpp
+Software/SmartRoom_Led_Strip/src/Secret_keys.example.cpp
+Software/SmartRoom_scheme/src/Secret_keys.cpp
