@@ -23,6 +23,7 @@ uint8_t led_bed_brightness = 150;
 uint32_t led_bed_color = 0xFFFFFF;
 uint8_t breath_period_s = 6;
 
+bool effect_enabled[SHELF_EFFECT_COUNT] = {
     true, true, true, true, true, true, false
 };
 ShelfEffect current_effect = ShelfEffect::COMET;
