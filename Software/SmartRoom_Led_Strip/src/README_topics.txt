@@ -1,14 +1,26 @@
 MQTT topics
 ===========
 
-LED1 (efekty):
-  smartroom/workshop/led1/set     payload: 1 / 0
-  smartroom/workshop/led1/state   payload: 1 / 0 (retained)
+LED_shelf:
+  smartroom/workshop/led_shelf/set     payload: 1 / 0
+  smartroom/workshop/led_shelf/state   payload: 1 / 0 (retained)
+LED_brightens:
+  smartroom/workshop/led_shelf/brightness   payload: 0-255 (retained)
 
-LED_BED (oddychanie):
+LED_BED:
   smartroom/workshop/led_bed/set     payload: 1 / 0
   smartroom/workshop/led_bed/state   payload: 1 / 0 (retained)
+LED_brightens:
+  smartroom/workshop/led_bed/brightness   payload: 0-255 (retained)
 
-OFF nie odcina zasilania. Program wysyla do paska RGB = 0,0,0 przez strip.clear() + strip.show().
+Przykład ustawienia jasności LED_BED:
+  topic:   smartroom/workshop/led_bed/brightness
+  payload: 120
 
-Secret_keys.cpp pozostaw lokalnie i dodaj do .gitignore. Secret_keys.h moze zostac w repo.
+LED_controller_status:
+  smartroom/workshop/LED_controller_status payload: 1 / 0 (retained)
+
+
+
+
+

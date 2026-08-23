@@ -1,4 +1,6 @@
 #pragma once
 
-void mqttBegin();
-void mqttLoop();
+#include <Arduino.h>
+
+void mqtt_begin();
+void mqtt_loop();

@@ -1,8 +1,9 @@
 #include "LEDs.h"
 #include "Pins.h"
-
+#include "MQTT.h"
 #include <Arduino.h>
 #include <Adafruit_NeoPixel.h>
+
 
 namespace {
 
@@ -15,8 +16,11 @@ Adafruit_NeoPixel strip1(LED_COUNT, LED_PIN_1, NEO_RGB + NEO_KHZ800);
 Adafruit_NeoPixel stripBed(LED_COUNT_BED, LED_BED_PIN, NEO_GRB + NEO_KHZ800);
 Adafruit_NeoPixel diagLed(1, DIAG_LED_PIN, NEO_GRB + NEO_KHZ800);
 
-bool led1Active = true;
-bool ledBedActive = true;
+bool led_shelfActive = true;
+bool led_bedActive = true;
+bool led_controllerActive = true;
+uint8_t led_shelf_brightness = 90;
+uint8_t led_bed_brightness = 150;
 
 uint8_t mode = 0;
 unsigned long lastChange = 0;
@@ -41,45 +45,45 @@ int bootPhase = 0;
 int bootStep = 0;
 int bootFlash = 0;
 
-void IRAM_ATTR pulseISR()
+void IRAM_ATTR pulse_isr()
 {
     pulseInterruptFlag = true;
 }
 
-uint32_t ironRed()  { return strip1.Color(255, 20, 0); }
-uint32_t darkRed()  { return strip1.Color(45, 0, 0); }
+uint32_t iron_red()  { return strip1.Color(255, 20, 0); }
+uint32_t dark_red()  { return strip1.Color(45, 0, 0); }
 uint32_t gold()     { return strip1.Color(255, 160, 0); }
-uint32_t hotGold()  { return strip1.Color(255, 220, 40); }
-uint32_t arcBlue()  { return strip1.Color(0, 140, 255); }
-uint32_t arcWhite() { return strip1.Color(255, 255, 255); }
+uint32_t hot_gold()  { return strip1.Color(255, 220, 40); }
+uint32_t arc_blue()  { return strip1.Color(0, 140, 255); }
+uint32_t arc_white() { return strip1.Color(255, 255, 255); }
 
-void clearLed1()
+void clear_led_shelf()
 {
     strip1.clear();            // RGB = 0,0,0 dla wszystkich pikseli
     strip1.show();
 }
 
-void clearLedBed()
+void clear_led_bed()
 {
     stripBed.clear();          // RGB = 0,0,0 dla wszystkich pikseli
     stripBed.show();
 }
 
-void setAll(uint32_t color)
+void set_all(uint32_t color)
 {
     for (uint16_t i = 0; i < LED_COUNT; ++i) {
         strip1.setPixelColor(i, color);
     }
 }
 
-void setPixel(int index, uint32_t color)
+void set_pixel(int index, uint32_t color)
 {
     if (index >= 0 && index < LED_COUNT) {
         strip1.setPixelColor(index, color);
     }
 }
 
-void resetEffectStates()
+void reset_effect_states()
 {
     gateStage = 0;
     gateStep = 0;
@@ -96,20 +100,20 @@ void resetEffectStates()
     bootFlash = 0;
 }
 
-void nextMode()
+void next_mode()
 {
     mode = (mode + 1) % MODE_COUNT;
     lastChange = millis();
-    resetEffectStates();
+    reset_effect_states();
 
-    if (led1Active) {
-        clearLed1();
+    if (led_shelfActive) {
+        clear_led_shelf();
     }
 }
 
-void updateBedLed()
+void update_bed_led()
 {
-    if (!ledBedActive) {
+    if (!led_bedActive) {
         return;
     }
 
@@ -124,7 +128,7 @@ void updateBedLed()
     stripBed.show();
 }
 
-void handlePulseInterrupt()
+void handle_pulse_interrupt()
 {
     if (!pulseInterruptFlag) {
         return;
@@ -146,11 +150,11 @@ void handlePulseInterrupt()
     diagLed.show();
     diagLedOffTime = now + 50;
 
-    // Fizyczny impuls przełącza tylko LED1. LED_BED pozostaje niezależny.
-    setLed1Enabled(!led1Active);
+    // Fizyczny impuls przełącza tylko ledshelf. LED_BED pozostaje niezależny.
+    set_led_shelf_enabled(!led_shelfActive);
 }
 
-void updateDiagLed()
+void update_diag_led()
 {
     if (diagLedOffTime > 0 && millis() >= diagLedOffTime) {
         diagLed.clear();
@@ -159,36 +163,36 @@ void updateDiagLed()
     }
 }
 
-void smartDelay(unsigned long ms)
+void smart_delay(unsigned long ms)
 {
     const unsigned long start = millis();
 
     while (millis() - start < ms) {
-        handlePulseInterrupt();
-        updateDiagLed();
-        updateBedLed();
+        handle_pulse_interrupt();
+        update_diag_led();
+        update_bed_led();
 
-        if (!led1Active) {
+        if (!led_shelfActive) {
             return;
         }
     }
 }
 
-uint32_t Wheel(byte wheelPos)
+uint32_t wheel(byte wheel_pos)
 {
-    if (wheelPos < 85) {
-        return strip1.Color(wheelPos * 3, 255 - wheelPos * 3, 0);
+    if (wheel_pos < 85) {
+        return strip1.Color(wheel_pos * 3, 255 - wheel_pos * 3, 0);
     }
-    if (wheelPos < 170) {
-        wheelPos -= 85;
-        return strip1.Color(255 - wheelPos * 3, 0, wheelPos * 3);
+    if (wheel_pos < 170) {
+        wheel_pos -= 85;
+        return strip1.Color(255 - wheel_pos * 3, 0, wheel_pos * 3);
     }
 
-    wheelPos -= 170;
-    return strip1.Color(0, wheelPos * 3, 255 - wheelPos * 3);
+    wheel_pos -= 170;
+    return strip1.Color(0, wheel_pos * 3, 255 - wheel_pos * 3);
 }
 
-void effectComet()
+void effect_comet()
 {
     static int pos = 0;
     constexpr int tail = 5;
@@ -199,33 +203,33 @@ void effectComet()
         const int idx = (pos - t + LED_COUNT) % LED_COUNT;
 
         if (t == 0) {
-            setPixel(idx, hotGold());
+            set_pixel(idx, hot_gold());
         }
         else {
             const uint8_t bright = 255 - t * (255 / tail);
-            setPixel(idx, strip1.Color(bright, 0, 0));
+            set_pixel(idx, strip1.Color(bright, 0, 0));
         }
     }
 
     strip1.show();
-    smartDelay(50);
+    smart_delay(50);
     pos = (pos + 1) % LED_COUNT;
 }
 
-void effectRainbow()
+void effect_rainbow()
 {
     static uint8_t j = 0;
 
     for (uint16_t i = 0; i < LED_COUNT; ++i) {
-        setPixel(i, Wheel((i * 256 / LED_COUNT + j) & 255));
+        set_pixel(i, wheel((i * 256 / LED_COUNT + j) & 255));
     }
 
     strip1.show();
     ++j;
-    smartDelay(20);
+    smart_delay(20);
 }
 
-void effectReactorGate()
+void effect_reactor_gate()
 {
     constexpr int tail = 4;
     constexpr int maxStep = LED_COUNT / 2;
@@ -241,20 +245,20 @@ void effectReactorGate()
             const int rightIdx = rightHead + t;
 
             if (leftIdx >= 0 && leftIdx < LED_COUNT) {
-                if (t == 0) setPixel(leftIdx, hotGold());
-                else if (t == 1) setPixel(leftIdx, ironRed());
-                else setPixel(leftIdx, strip1.Color(150 - t * 30, 0, 0));
+                if (t == 0) set_pixel(leftIdx, hot_gold());
+                else if (t == 1) set_pixel(leftIdx, iron_red());
+                else set_pixel(leftIdx, strip1.Color(150 - t * 30, 0, 0));
             }
 
             if (rightIdx >= 0 && rightIdx < LED_COUNT) {
-                if (t == 0) setPixel(rightIdx, hotGold());
-                else if (t == 1) setPixel(rightIdx, ironRed());
-                else setPixel(rightIdx, strip1.Color(150 - t * 30, 0, 0));
+                if (t == 0) set_pixel(rightIdx, hot_gold());
+                else if (t == 1) set_pixel(rightIdx, iron_red());
+                else set_pixel(rightIdx, strip1.Color(150 - t * 30, 0, 0));
             }
         }
 
         strip1.show();
-        smartDelay(65);
+        smart_delay(65);
 
         ++gateStep;
         if (gateStep >= maxStep) {
@@ -268,15 +272,15 @@ void effectReactorGate()
         const uint8_t g = 80 + ((175 * fade) / 255);
         const uint8_t b = fade;
 
-        setAll(strip1.Color(r, g, b));
+        set_all(strip1.Color(r, g, b));
 
         const int c1 = (LED_COUNT - 1) / 2;
         const int c2 = LED_COUNT / 2;
-        setPixel(c1, arcWhite());
-        setPixel(c2, arcWhite());
+        set_pixel(c1, arc_white());
+        set_pixel(c2, arc_white());
 
         strip1.show();
-        smartDelay(30);
+        smart_delay(30);
 
         gateFade += 15;
         if (gateFade >= 255) {
@@ -285,18 +289,18 @@ void effectReactorGate()
         }
     }
     else {
-        setAll(strip1.Color(120, 220, 255));
+        set_all(strip1.Color(120, 220, 255));
         strip1.show();
-        smartDelay(80);
+        smart_delay(80);
 
         ++gateHold;
         if (gateHold >= 4) {
-            nextMode();
+            next_mode();
         }
     }
 }
 
-void effectArcReactor()
+void effect_arc_reactor()
 {
     static int brightness = 25;
     static int dir = 4;
@@ -304,15 +308,15 @@ void effectArcReactor()
     const uint8_t r = brightness / 5;
     const uint8_t g = brightness;
     const uint8_t b = brightness;
-    setAll(strip1.Color(r, g, b));
+    set_all(strip1.Color(r, g, b));
 
     const int c1 = (LED_COUNT - 1) / 2;
     const int c2 = LED_COUNT / 2;
-    setPixel(c1, strip1.Color(brightness / 2, brightness, 255));
-    setPixel(c2, strip1.Color(brightness / 2, brightness, 255));
+    set_pixel(c1, strip1.Color(brightness / 2, brightness, 255));
+    set_pixel(c2, strip1.Color(brightness / 2, brightness, 255));
 
     strip1.show();
-    smartDelay(35);
+    smart_delay(35);
 
     brightness += dir;
     if (brightness >= 210 || brightness <= 25) {
@@ -321,25 +325,25 @@ void effectArcReactor()
     }
 }
 
-void effectRepulsorCharge()
+void effect_repulsor_charge()
 {
     const int leftCenter = (LED_COUNT - 1) / 2;
     const int rightCenter = LED_COUNT / 2;
     const int maxRadius = LED_COUNT / 2;
 
     if (repPhase == 0) {
-        setAll(darkRed());
+        set_all(dark_red());
 
         for (int r = 0; r <= repRadius; ++r) {
-            setPixel(leftCenter - r, gold());
-            setPixel(rightCenter + r, gold());
+            set_pixel(leftCenter - r, gold());
+            set_pixel(rightCenter + r, gold());
         }
 
-        setPixel(leftCenter, arcWhite());
-        setPixel(rightCenter, arcWhite());
+        set_pixel(leftCenter, arc_white());
+        set_pixel(rightCenter, arc_white());
 
         strip1.show();
-        smartDelay(85);
+        smart_delay(85);
 
         ++repRadius;
         if (repRadius > maxRadius) {
@@ -348,9 +352,9 @@ void effectRepulsorCharge()
         }
     }
     else if (repPhase == 1) {
-        setAll(arcBlue());
+        set_all(arc_blue());
         strip1.show();
-        smartDelay(75);
+        smart_delay(75);
 
         ++repFlash;
         if (repFlash >= 5) {
@@ -359,9 +363,9 @@ void effectRepulsorCharge()
         }
     }
     else {
-        setAll(strip1.Color(repFade, repFade / 5, 0));
+        set_all(strip1.Color(repFade, repFade / 5, 0));
         strip1.show();
-        smartDelay(35);
+        smart_delay(35);
 
         repFade -= 18;
         if (repFade <= 45) {
@@ -373,23 +377,23 @@ void effectRepulsorCharge()
     }
 }
 
-void effectSuitBootUp()
+void effect_suit_boot_up()
 {
     if (bootPhase == 0) {
         strip1.clear();
 
         for (int i = 0; i < LED_COUNT; ++i) {
             if (i < bootStep) {
-                setPixel(i, ironRed());
+                set_pixel(i, iron_red());
             }
         }
 
         if (bootStep < LED_COUNT) {
-            setPixel(bootStep, hotGold());
+            set_pixel(bootStep, hot_gold());
         }
 
         strip1.show();
-        smartDelay(80);
+        smart_delay(80);
 
         ++bootStep;
         if (bootStep > LED_COUNT) {
@@ -398,15 +402,15 @@ void effectSuitBootUp()
         }
     }
     else if (bootPhase == 1) {
-        setAll(ironRed());
+        set_all(iron_red());
 
         const int scan = bootStep;
-        setPixel(scan, arcWhite());
-        setPixel(scan - 1, hotGold());
-        setPixel(scan - 2, gold());
+        set_pixel(scan, arc_white());
+        set_pixel(scan - 1, hot_gold());
+        set_pixel(scan - 2, gold());
 
         strip1.show();
-        smartDelay(55);
+        smart_delay(55);
 
         ++bootStep;
         if (bootStep >= LED_COUNT + 3) {
@@ -415,9 +419,9 @@ void effectSuitBootUp()
         }
     }
     else {
-        setAll(ironRed());
+        set_all(iron_red());
         strip1.show();
-        smartDelay(90);
+        smart_delay(90);
 
         ++bootFlash;
         if (bootFlash >= 4) {
@@ -430,19 +434,19 @@ void effectSuitBootUp()
 
 } // namespace
 
-void ledsInit()
+void leds_init()
 {
     diagLed.begin();
     diagLed.clear();
     diagLed.show();
 
     strip1.begin();
-    strip1.setBrightness(90);
-    clearLed1();
+    strip1.setBrightness(led_shelf_brightness);
+    clear_led_shelf();
 
     stripBed.begin();
-    stripBed.setBrightness(150);
-    clearLedBed();
+    stripBed.setBrightness(led_bed_brightness);
+    clear_led_bed();
 
     lastChange = millis();
 
@@ -451,72 +455,99 @@ void ledsInit()
         Serial.println("UWAGA: PULSE_PIN nie obsluguje attachInterrupt().");
     }
     else {
-        attachInterrupt(interruptNumber, pulseISR, RISING);
+        attachInterrupt(interruptNumber, pulse_isr, RISING);
         Serial.println("Przerwanie PULSE_PIN aktywne.");
     }
 }
 
-void ledsLoop()
+void leds_loop()
 {
-    handlePulseInterrupt();
-    updateDiagLed();
-    updateBedLed();
+    handle_pulse_interrupt();
+    update_diag_led();
+    update_bed_led();
 
-    if (!led1Active) {
+    if (!led_shelfActive) {
         return;
     }
 
     const unsigned long now = millis();
     if (now - lastChange > MODE_TIME) {
-        nextMode();
+        next_mode();
     }
 
     switch (mode) {
-        case 0: effectComet(); break;
-        case 1: effectRainbow(); break;
-        case 2: effectReactorGate(); break;
-        case 3: effectArcReactor(); break;
-        case 4: effectRepulsorCharge(); break;
-        case 5: effectSuitBootUp(); break;
+        case 0: effect_comet(); break;
+        case 1: effect_rainbow(); break;
+        case 2: effect_reactor_gate(); break;
+        case 3: effect_arc_reactor(); break;
+        case 4: effect_repulsor_charge(); break;
+        case 5: effect_suit_boot_up(); break;
     }
 }
 
-void setLed1Enabled(bool enabled)
+void set_led_shelf_enabled(bool enabled)
 {
-    if (led1Active == enabled) {
+    if (led_shelfActive == enabled) {
         return;
     }
 
-    led1Active = enabled;
+    led_shelfActive = enabled;
 
-    if (!led1Active) {
-        clearLed1();
+    if (!led_shelfActive) {
+        clear_led_shelf();
     }
     else {
         lastChange = millis();
-        resetEffectStates();
+        reset_effect_states();
     }
 }
 
-void setLedBedEnabled(bool enabled)
+void set_led_bed_enabled(bool enabled)
 {
-    if (ledBedActive == enabled) {
+    if (led_bedActive == enabled) {
         return;
     }
 
-    ledBedActive = enabled;
+    led_bedActive = enabled;
 
-    if (!ledBedActive) {
-        clearLedBed();
+    if (!led_bedActive) {
+        clear_led_bed();
     }
 }
 
-bool isLed1Enabled()
+void set_led_bed_brightness(uint8_t brightness)
 {
-    return led1Active;
+    led_bed_brightness = brightness;
+    stripBed.setBrightness(led_bed_brightness);
 }
 
-bool isLedBedEnabled()
+void set_led_shelf_brightness(uint8_t brightness)
 {
-    return ledBedActive;
+    led_shelf_brightness = brightness;
+    strip1.setBrightness(led_shelf_brightness);
+}
+
+uint8_t get_led_shelf_brightness()
+{
+    return led_shelf_brightness;
+}
+
+uint8_t get_led_bed_brightness()
+{
+    return led_bed_brightness;
+}
+
+bool is_led_shelf_enabled()
+{
+    return led_shelfActive;
+}
+
+bool is_led_bed_enabled()
+{
+    return led_bedActive;
+}
+
+bool is_led_controller_enabled()
+{
+    return led_controllerActive;
 }

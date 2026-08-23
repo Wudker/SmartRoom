@@ -7,12 +7,12 @@ void setup()
 {
     pins_init();
     wifi_init();
-    ledsInit();
-    mqttBegin();
+    leds_init();
+    mqtt_begin();
 }
 
 void loop()
 {
-    mqttLoop();
-    ledsLoop();
+    mqtt_loop();
+    leds_loop();
 }
