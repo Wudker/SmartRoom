@@ -3,188 +3,318 @@
 #include "Secret_keys.h"
 
 #include <Arduino.h>
-#include <WiFi.h>
 #include <PubSubClient.h>
-#include <cstring>
+#include <WiFi.h>
+#include <cctype>
+#include <cstdio>
 #include <cstdlib>
+#include <cstring>
 
 namespace {
 
 constexpr int MQTT_PORT = 1883;
+constexpr unsigned long MQTT_RETRY_MS = 5000UL;
 
-const char* TOPIC_LED_shelf_SET             = "smartroom/workshop/led_shelf/set";
-const char* TOPIC_LED_shelf_STATE           = "smartroom/workshop/led_shelf/state";
-const char* TOPIC_LED_BED_SET               = "smartroom/workshop/led_bed/set";
-const char* TOPIC_LED_BED_STATE             = "smartroom/workshop/led_bed/state";
-const char* TOPIC_LED_CONTROLLER_STATE      = "smartroom/workshop/led_controller/state";
-const char* TOPIC_LED_shelf_BRIGHTNESS      = "smartroom/workshop/led_shelf/brightness";
-const char* TOPIC_LED_BED_BRIGHTNESS        = "smartroom/workshop/led_bed/brightness";
+const char* TOPIC_AVAILABILITY = "smartroom/workshop/led_controller/availability";
 
-WiFiClient wifiClient;
-PubSubClient mqttClient(wifiClient);
+const char* TOPIC_SHELF_SET = "smartroom/workshop/led_shelf/set";
+const char* TOPIC_SHELF_STATE = "smartroom/workshop/led_shelf/state";
+const char* TOPIC_SHELF_BRIGHTNESS_SET = "smartroom/workshop/led_shelf/brightness/set";
+const char* TOPIC_SHELF_BRIGHTNESS_STATE = "smartroom/workshop/led_shelf/brightness/state";
+const char* TOPIC_SHELF_CURRENT_EFFECT_STATE = "smartroom/workshop/led_shelf/effect/current/state";
 
-void publish_led_shelf_state()
-{
-    mqttClient.publish(TOPIC_LED_shelf_STATE, is_led_shelf_enabled() ? "1" : "0", true);
-}
+const char* TOPIC_BED_SET = "smartroom/workshop/led_bed/set";
+const char* TOPIC_BED_STATE = "smartroom/workshop/led_bed/state";
+const char* TOPIC_BED_BRIGHTNESS_SET = "smartroom/workshop/led_bed/brightness/set";
+const char* TOPIC_BED_BRIGHTNESS_STATE = "smartroom/workshop/led_bed/brightness/state";
+const char* TOPIC_BED_COLOR_SET = "smartroom/workshop/led_bed/color/set";
+const char* TOPIC_BED_COLOR_STATE = "smartroom/workshop/led_bed/color/state";
+const char* TOPIC_BREATH_PERIOD_SET = "smartroom/workshop/led_bed/breath_period_s/set";
+const char* TOPIC_BREATH_PERIOD_STATE = "smartroom/workshop/led_bed/breath_period_s/state";
 
-void publish_led_bed_state()
-{
-    mqttClient.publish(TOPIC_LED_BED_STATE, is_led_bed_enabled() ? "1" : "0", true);
-}
+struct EffectTopics {
+    ShelfEffect effect;
+    const char* set_topic;
+    const char* state_topic;
+};
 
-void publish_led_controller_state()
-{
-    mqttClient.publish(TOPIC_LED_CONTROLLER_STATE, is_led_controller_enabled() ? "1" : "0", true);
-}
+const EffectTopics EFFECT_TOPICS[SHELF_EFFECT_COUNT] = {
+    {ShelfEffect::COMET,
+     "smartroom/workshop/led_shelf/effect/comet/set",
+     "smartroom/workshop/led_shelf/effect/comet/state"},
+    {ShelfEffect::RAINBOW,
+     "smartroom/workshop/led_shelf/effect/rainbow/set",
+     "smartroom/workshop/led_shelf/effect/rainbow/state"},
+    {ShelfEffect::REACTOR_GATE,
+     "smartroom/workshop/led_shelf/effect/reactor_gate/set",
+     "smartroom/workshop/led_shelf/effect/reactor_gate/state"},
+    {ShelfEffect::ARC_REACTOR,
+     "smartroom/workshop/led_shelf/effect/arc_reactor/set",
+     "smartroom/workshop/led_shelf/effect/arc_reactor/state"},
+    {ShelfEffect::REPULSOR_CHARGE,
+     "smartroom/workshop/led_shelf/effect/repulsor_charge/set",
+     "smartroom/workshop/led_shelf/effect/repulsor_charge/state"},
+    {ShelfEffect::SUIT_BOOT,
+     "smartroom/workshop/led_shelf/effect/suit_boot/set",
+     "smartroom/workshop/led_shelf/effect/suit_boot/state"},
+    {ShelfEffect::BREATH,
+     "smartroom/workshop/led_shelf/effect/breath/set",
+     "smartroom/workshop/led_shelf/effect/breath/state"}
+};
+
+WiFiClient wifi_client;
+PubSubClient mqtt_client(wifi_client);
+unsigned long last_mqtt_attempt = 0;
+
+struct StateCache {
+    bool valid;
+    bool shelf_enabled;
+    bool bed_enabled;
+    uint8_t shelf_brightness;
+    uint8_t bed_brightness;
+    uint32_t bed_color;
+    uint8_t breath_period;
+    ShelfEffect current_effect;
+    bool effects[SHELF_EFFECT_COUNT];
+};
+
+StateCache state_cache = {};
 
 bool read_on_off_payload(const byte* payload, unsigned int length, bool& value)
 {
-    if (length != 1) {
+    if (length != 1 || (payload[0] != '0' && payload[0] != '1')) {
         return false;
     }
 
-    if (payload[0] == '1') {
-        value = true;
-        return true;
-    }
-
-    if (payload[0] == '0') {
-        value = false;
-        return true;
-    }
-
-    return false;
+    value = payload[0] == '1';
+    return true;
 }
 
-bool read_brightness_payload(const byte* payload, unsigned int length, uint8_t& brightness)
+bool read_uint_payload(const byte* payload, unsigned int length,
+                       unsigned long max_value, uint8_t& value)
 {
     if (length == 0 || length > 3) {
         return false;
     }
 
     char buffer[4] = {};
-    memcpy(buffer, payload, length);
+    for (unsigned int i = 0; i < length; ++i) {
+        if (!isdigit(static_cast<unsigned char>(payload[i]))) {
+            return false;
+        }
+        buffer[i] = static_cast<char>(payload[i]);
+    }
 
-    char* end = nullptr;
-    const unsigned long value = strtoul(buffer, &end, 10);
-    if (*end != '\0' || value > 255) {
+    const unsigned long parsed = strtoul(buffer, nullptr, 10);
+    if (parsed > max_value) {
         return false;
     }
 
-    brightness = static_cast<uint8_t>(value);
+    value = static_cast<uint8_t>(parsed);
     return true;
 }
 
-void publish_led_bed_brightness()
+bool read_color_payload(const byte* payload, unsigned int length, uint32_t& rgb)
 {
-    char brightness[4];
-    snprintf(brightness, sizeof(brightness), "%u", get_led_bed_brightness());
-    mqttClient.publish(TOPIC_LED_BED_BRIGHTNESS, brightness, true);
+    const unsigned int offset = length == 7 && payload[0] == '#' ? 1 : 0;
+    if (length - offset != 6) {
+        return false;
+    }
+
+    char buffer[7] = {};
+    for (unsigned int i = 0; i < 6; ++i) {
+        const char value = static_cast<char>(payload[i + offset]);
+        if (!isxdigit(static_cast<unsigned char>(value))) {
+            return false;
+        }
+        buffer[i] = value;
+    }
+
+    rgb = strtoul(buffer, nullptr, 16);
+    return true;
 }
 
-void publish_led_shelf_brightness()
+bool publish_bool(const char* topic, bool value)
 {
-    char brightness[4];
-    snprintf(brightness, sizeof(brightness), "%u", get_led_shelf_brightness());
-    mqttClient.publish(TOPIC_LED_shelf_BRIGHTNESS, brightness, true);
+    return mqtt_client.publish(topic, value ? "1" : "0", true);
+}
+
+bool publish_uint(const char* topic, uint8_t value)
+{
+    char payload[4];
+    snprintf(payload, sizeof(payload), "%u", value);
+    return mqtt_client.publish(topic, payload, true);
+}
+
+bool publish_color(const char* topic, uint32_t rgb)
+{
+    char payload[7];
+    snprintf(payload, sizeof(payload), "%06lX", static_cast<unsigned long>(rgb));
+    return mqtt_client.publish(topic, payload, true);
+}
+
+void publish_state_changes(bool force)
+{
+    const bool shelf_enabled = is_led_shelf_enabled();
+    const bool bed_enabled = is_led_bed_enabled();
+    const uint8_t shelf_brightness = get_led_shelf_brightness();
+    const uint8_t bed_brightness = get_led_bed_brightness();
+    const uint32_t bed_color = get_led_bed_color();
+    const uint8_t breath_period = get_breath_period_s();
+    const ShelfEffect current_effect = get_current_shelf_effect();
+
+    if (force || !state_cache.valid || state_cache.shelf_enabled != shelf_enabled) {
+        publish_bool(TOPIC_SHELF_STATE, shelf_enabled);
+        state_cache.shelf_enabled = shelf_enabled;
+    }
+    if (force || !state_cache.valid || state_cache.bed_enabled != bed_enabled) {
+        publish_bool(TOPIC_BED_STATE, bed_enabled);
+        state_cache.bed_enabled = bed_enabled;
+    }
+    if (force || !state_cache.valid || state_cache.shelf_brightness != shelf_brightness) {
+        publish_uint(TOPIC_SHELF_BRIGHTNESS_STATE, shelf_brightness);
+        state_cache.shelf_brightness = shelf_brightness;
+    }
+    if (force || !state_cache.valid || state_cache.bed_brightness != bed_brightness) {
+        publish_uint(TOPIC_BED_BRIGHTNESS_STATE, bed_brightness);
+        state_cache.bed_brightness = bed_brightness;
+    }
+    if (force || !state_cache.valid || state_cache.bed_color != bed_color) {
+        publish_color(TOPIC_BED_COLOR_STATE, bed_color);
+        state_cache.bed_color = bed_color;
+    }
+    if (force || !state_cache.valid || state_cache.breath_period != breath_period) {
+        publish_uint(TOPIC_BREATH_PERIOD_STATE, breath_period);
+        state_cache.breath_period = breath_period;
+    }
+    if (force || !state_cache.valid || state_cache.current_effect != current_effect) {
+        mqtt_client.publish(TOPIC_SHELF_CURRENT_EFFECT_STATE,
+                            get_shelf_effect_name(current_effect), true);
+        state_cache.current_effect = current_effect;
+    }
+
+    for (uint8_t i = 0; i < SHELF_EFFECT_COUNT; ++i) {
+        const bool enabled = is_shelf_effect_enabled(EFFECT_TOPICS[i].effect);
+        if (force || !state_cache.valid || state_cache.effects[i] != enabled) {
+            publish_bool(EFFECT_TOPICS[i].state_topic, enabled);
+            state_cache.effects[i] = enabled;
+        }
+    }
+
+    state_cache.valid = true;
 }
 
 void mqtt_callback(char* topic, byte* payload, unsigned int length)
 {
-    Serial.print("MQTT received: ");
-    Serial.print(topic);
-    Serial.print(" -> ");
+    bool enabled = false;
 
-    for (unsigned int i = 0; i < length; ++i) {
-        Serial.print(static_cast<char>(payload[i]));
+    if (strcmp(topic, TOPIC_SHELF_SET) == 0) {
+        if (read_on_off_payload(payload, length, enabled)) {
+            set_led_shelf_enabled(enabled);
+        }
+        return;
     }
-    Serial.println();
+    if (strcmp(topic, TOPIC_BED_SET) == 0) {
+        if (read_on_off_payload(payload, length, enabled)) {
+            set_led_bed_enabled(enabled);
+        }
+        return;
+    }
 
-    if (strcmp(topic, TOPIC_LED_shelf_BRIGHTNESS) == 0 ||
-        strcmp(topic, TOPIC_LED_BED_BRIGHTNESS) == 0) {
-        uint8_t brightness = 0;
-        if (!read_brightness_payload(payload, length, brightness)) {
-            Serial.println("Ignored brightness payload. Expected 0-255.");
+    uint8_t value = 0;
+    if (strcmp(topic, TOPIC_SHELF_BRIGHTNESS_SET) == 0) {
+        if (read_uint_payload(payload, length, 255, value)) {
+            set_led_shelf_brightness(value);
+        }
+        return;
+    }
+    if (strcmp(topic, TOPIC_BED_BRIGHTNESS_SET) == 0) {
+        if (read_uint_payload(payload, length, 255, value)) {
+            set_led_bed_brightness(value);
+        }
+        return;
+    }
+    if (strcmp(topic, TOPIC_BREATH_PERIOD_SET) == 0) {
+        if (read_uint_payload(payload, length, 10, value)) {
+            set_breath_period_s(value);
+        }
+        return;
+    }
+
+    if (strcmp(topic, TOPIC_BED_COLOR_SET) == 0) {
+        uint32_t rgb = 0;
+        if (read_color_payload(payload, length, rgb)) {
+            set_led_bed_color(rgb);
+        }
+        return;
+    }
+
+    for (const EffectTopics& effect_topics : EFFECT_TOPICS) {
+        if (strcmp(topic, effect_topics.set_topic) == 0) {
+            if (read_on_off_payload(payload, length, enabled) &&
+                !set_shelf_effect_enabled(effect_topics.effect, enabled)) {
+                Serial.println("At least one shelf effect must remain enabled.");
+            }
             return;
         }
-
-        if (strcmp(topic, TOPIC_LED_shelf_BRIGHTNESS) == 0) {
-            set_led_shelf_brightness(brightness);
-            publish_led_shelf_brightness();
-        }
-        else {
-            set_led_bed_brightness(brightness);
-            publish_led_bed_brightness();
-        }
-        return;
     }
 
-    bool enabled = false;
-    if (!read_on_off_payload(payload, length, enabled)) {
-        Serial.println("Ignored MQTT payload. Expected 0 or 1.");
-        return;
-    }
+    Serial.println("Unknown MQTT topic or invalid payload.");
+}
 
-    if (strcmp(topic, TOPIC_LED_shelf_SET) == 0) {
-        set_led_shelf_enabled(enabled);
-        publish_led_shelf_state();
-    }
-    else if (strcmp(topic, TOPIC_LED_BED_SET) == 0) {
-        set_led_bed_enabled(enabled);
-        publish_led_bed_state();
+void subscribe_topics()
+{
+    mqtt_client.subscribe(TOPIC_SHELF_SET);
+    mqtt_client.subscribe(TOPIC_BED_SET);
+    mqtt_client.subscribe(TOPIC_SHELF_BRIGHTNESS_SET);
+    mqtt_client.subscribe(TOPIC_BED_BRIGHTNESS_SET);
+    mqtt_client.subscribe(TOPIC_BED_COLOR_SET);
+    mqtt_client.subscribe(TOPIC_BREATH_PERIOD_SET);
+
+    for (const EffectTopics& effect_topics : EFFECT_TOPICS) {
+        mqtt_client.subscribe(effect_topics.set_topic);
     }
 }
 
 void connect_mqtt()
 {
-    while (!mqttClient.connected()) {
-        if (WiFi.status() != WL_CONNECTED) {
-            Serial.println("WiFi not connected, reconnecting...");
-            WiFi.reconnect();
-            delay(1000);
-            continue;
-        }
+    last_mqtt_attempt = millis();
 
-        Serial.print("Connecting to MQTT... ");
-
-        if (mqttClient.connect("SmartRoom_LED_STRIPS")) {
-            Serial.println("connected");
-
-            mqttClient.subscribe(TOPIC_LED_shelf_SET);
-            mqttClient.subscribe(TOPIC_LED_BED_SET);
-            mqttClient.subscribe(TOPIC_LED_shelf_BRIGHTNESS);
-            mqttClient.subscribe(TOPIC_LED_BED_BRIGHTNESS);
-
-            // STATE jest retained: po ponownym podłączeniu Node-RED od razu zna stan.
-            publish_led_shelf_state();
-            publish_led_bed_state();
-            publish_led_controller_state();
-            publish_led_shelf_brightness();
-            publish_led_bed_brightness();
-        }
-        else {
-            Serial.print("failed, state = ");
-            Serial.println(mqttClient.state());
-            delay(1000);
-        }
+    if (WiFi.status() != WL_CONNECTED) {
+        WiFi.reconnect();
+        return;
     }
+
+    if (!mqtt_client.connect("SmartRoom_LED_STRIPS",
+                             TOPIC_AVAILABILITY, 1, true, "offline")) {
+        return;
+    }
+
+    subscribe_topics();
+    mqtt_client.publish(TOPIC_AVAILABILITY, "online", true);
+    state_cache.valid = false;
+    publish_state_changes(true);
 }
 
 } // namespace
 
 void mqtt_begin()
 {
-    mqttClient.setServer(mqttBroker_ip, MQTT_PORT);
-    mqttClient.setCallback(mqtt_callback);
+    mqtt_client.setServer(mqttBroker_ip, MQTT_PORT);
+    mqtt_client.setCallback(mqtt_callback);
+    mqtt_client.setBufferSize(512);
     connect_mqtt();
 }
 
 void mqtt_loop()
 {
-    if (!mqttClient.connected()) {
-        connect_mqtt();
+    if (!mqtt_client.connected()) {
+        if (millis() - last_mqtt_attempt >= MQTT_RETRY_MS) {
+            connect_mqtt();
+        }
+        return;
     }
 
-    mqttClient.loop();
+    mqtt_client.loop();
+    publish_state_changes(false);
 }

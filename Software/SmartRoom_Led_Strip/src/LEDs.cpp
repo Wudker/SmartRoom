@@ -1,165 +1,220 @@
 #include "LEDs.h"
 #include "Pins.h"
-#include "MQTT.h"
-#include <Arduino.h>
-#include <Adafruit_NeoPixel.h>
 
+#include <Adafruit_NeoPixel.h>
+#include <Arduino.h>
+#include <cmath>
 
 namespace {
 
-constexpr uint16_t LED_COUNT     = 12;
+constexpr uint16_t LED_COUNT = 12;
 constexpr uint16_t LED_COUNT_BED = 20;
-constexpr uint8_t MODE_COUNT     = 6;
-constexpr unsigned long MODE_TIME = 5000UL;
+constexpr unsigned long EFFECT_TIME_MS = 5000UL;
+constexpr unsigned long BED_FRAME_MS = 25UL;
 
-Adafruit_NeoPixel strip1(LED_COUNT, LED_PIN_1, NEO_RGB + NEO_KHZ800);
-Adafruit_NeoPixel stripBed(LED_COUNT_BED, LED_BED_PIN, NEO_GRB + NEO_KHZ800);
-Adafruit_NeoPixel diagLed(1, DIAG_LED_PIN, NEO_GRB + NEO_KHZ800);
+Adafruit_NeoPixel strip_shelf(LED_COUNT, LED_PIN_1, NEO_RGB + NEO_KHZ800);
+Adafruit_NeoPixel strip_bed(LED_COUNT_BED, LED_BED_PIN, NEO_GRB + NEO_KHZ800);
+Adafruit_NeoPixel diag_led(1, DIAG_LED_PIN, NEO_GRB + NEO_KHZ800);
 
-bool led_shelfActive = true;
-bool led_bedActive = true;
-bool led_controllerActive = true;
+bool led_shelf_active = true;
+bool led_bed_active = true;
 uint8_t led_shelf_brightness = 90;
 uint8_t led_bed_brightness = 150;
+uint32_t led_bed_color = 0xFFFFFF;
+uint8_t breath_period_s = 6;
 
-uint8_t mode = 0;
-unsigned long lastChange = 0;
+    true, true, true, true, true, true, false
+};
+ShelfEffect current_effect = ShelfEffect::COMET;
+unsigned long last_effect_change = 0;
+unsigned long last_bed_frame = 0;
 
-volatile bool pulseInterruptFlag = false;
-unsigned long lastPulseHandled = 0;
+volatile bool pulse_interrupt_flag = false;
+unsigned long last_pulse_handled = 0;
 constexpr unsigned long PULSE_DEBOUNCE_TIME = 2000UL;
+unsigned long diag_led_off_time = 0;
 
-unsigned long diagLedOffTime = 0;
-
-int gateStage = 0;
-int gateStep = 0;
-int gateFade = 0;
-int gateHold = 0;
-
-int repPhase = 0;
-int repRadius = 0;
-int repFlash = 0;
-int repFade = 255;
-
-int bootPhase = 0;
-int bootStep = 0;
-int bootFlash = 0;
+int comet_pos = 0;
+uint8_t rainbow_offset = 0;
+int gate_stage = 0;
+int gate_step = 0;
+int gate_fade = 0;
+int gate_hold = 0;
+int arc_brightness = 25;
+int arc_dir = 4;
+int rep_phase = 0;
+int rep_radius = 0;
+int rep_flash = 0;
+int rep_fade = 255;
+int boot_phase = 0;
+int boot_step = 0;
+int boot_flash = 0;
 
 void IRAM_ATTR pulse_isr()
 {
-    pulseInterruptFlag = true;
+    pulse_interrupt_flag = true;
 }
 
-uint32_t iron_red()  { return strip1.Color(255, 20, 0); }
-uint32_t dark_red()  { return strip1.Color(45, 0, 0); }
-uint32_t gold()     { return strip1.Color(255, 160, 0); }
-uint32_t hot_gold()  { return strip1.Color(255, 220, 40); }
-uint32_t arc_blue()  { return strip1.Color(0, 140, 255); }
-uint32_t arc_white() { return strip1.Color(255, 255, 255); }
+uint32_t iron_red() { return strip_shelf.Color(255, 20, 0); }
+uint32_t dark_red() { return strip_shelf.Color(45, 0, 0); }
+uint32_t gold() { return strip_shelf.Color(255, 160, 0); }
+uint32_t hot_gold() { return strip_shelf.Color(255, 220, 40); }
+uint32_t arc_blue() { return strip_shelf.Color(0, 140, 255); }
+uint32_t arc_white() { return strip_shelf.Color(255, 255, 255); }
+
+uint8_t red(uint32_t rgb) { return (rgb >> 16) & 0xFF; }
+uint8_t green(uint32_t rgb) { return (rgb >> 8) & 0xFF; }
+uint8_t blue(uint32_t rgb) { return rgb & 0xFF; }
+
+float breath_level(unsigned long now)
+{
+    if (breath_period_s == 0) {
+        return 1.0f;
+    }
+
+    const unsigned long period_ms = breath_period_s * 1000UL;
+    const float phase = static_cast<float>(now % period_ms) / period_ms;
+    return 0.08f + 0.92f * (0.5f - 0.5f * cosf(2.0f * PI * phase));
+}
+
+uint32_t scaled_color(Adafruit_NeoPixel& strip, uint32_t rgb, float level)
+{
+    return strip.Color(
+        static_cast<uint8_t>(red(rgb) * level),
+        static_cast<uint8_t>(green(rgb) * level),
+        static_cast<uint8_t>(blue(rgb) * level));
+}
 
 void clear_led_shelf()
 {
-    strip1.clear();            // RGB = 0,0,0 dla wszystkich pikseli
-    strip1.show();
+    strip_shelf.clear();
+    strip_shelf.show();
 }
 
 void clear_led_bed()
 {
-    stripBed.clear();          // RGB = 0,0,0 dla wszystkich pikseli
-    stripBed.show();
+    strip_bed.clear();
+    strip_bed.show();
 }
 
 void set_all(uint32_t color)
 {
     for (uint16_t i = 0; i < LED_COUNT; ++i) {
-        strip1.setPixelColor(i, color);
+        strip_shelf.setPixelColor(i, color);
     }
 }
 
 void set_pixel(int index, uint32_t color)
 {
     if (index >= 0 && index < LED_COUNT) {
-        strip1.setPixelColor(index, color);
+        strip_shelf.setPixelColor(index, color);
     }
 }
 
 void reset_effect_states()
 {
-    gateStage = 0;
-    gateStep = 0;
-    gateFade = 0;
-    gateHold = 0;
-
-    repPhase = 0;
-    repRadius = 0;
-    repFlash = 0;
-    repFade = 255;
-
-    bootPhase = 0;
-    bootStep = 0;
-    bootFlash = 0;
+    comet_pos = 0;
+    rainbow_offset = 0;
+    gate_stage = 0;
+    gate_step = 0;
+    gate_fade = 0;
+    gate_hold = 0;
+    arc_brightness = 25;
+    arc_dir = 4;
+    rep_phase = 0;
+    rep_radius = 0;
+    rep_flash = 0;
+    rep_fade = 255;
+    boot_phase = 0;
+    boot_step = 0;
+    boot_flash = 0;
 }
 
-void next_mode()
+uint8_t effect_index(ShelfEffect effect)
 {
-    mode = (mode + 1) % MODE_COUNT;
-    lastChange = millis();
+    return static_cast<uint8_t>(effect);
+}
+
+uint8_t enabled_effect_count()
+{
+    uint8_t count = 0;
+    for (bool enabled : effect_enabled) {
+        count += enabled ? 1 : 0;
+    }
+    return count;
+}
+
+void next_effect()
+{
+    const uint8_t current = effect_index(current_effect);
+
+    for (uint8_t offset = 1; offset <= SHELF_EFFECT_COUNT; ++offset) {
+        const uint8_t candidate = (current + offset) % SHELF_EFFECT_COUNT;
+        if (effect_enabled[candidate]) {
+            current_effect = static_cast<ShelfEffect>(candidate);
+            break;
+        }
+    }
+
+    last_effect_change = millis();
     reset_effect_states();
 
-    if (led_shelfActive) {
+    if (led_shelf_active) {
         clear_led_shelf();
     }
 }
 
-void update_bed_led()
+unsigned long current_effect_time_ms()
 {
-    if (!led_bedActive) {
+    if (current_effect == ShelfEffect::BREATH && breath_period_s > 0) {
+        return max(EFFECT_TIME_MS, breath_period_s * 1000UL);
+    }
+    return EFFECT_TIME_MS;
+}
+
+void update_bed_led(unsigned long now)
+{
+    if (!led_bed_active || now - last_bed_frame < BED_FRAME_MS) {
         return;
     }
 
-    const float brightnessFactor = (sin(millis() / 3000.0 * PI) + 1.0) / 2.0;
-    const uint8_t whiteBrightness = 15 + static_cast<uint8_t>(brightnessFactor * 240.0);
-    const uint32_t whiteColor = stripBed.Color(whiteBrightness, whiteBrightness, whiteBrightness);
+    last_bed_frame = now;
+    const uint32_t color = scaled_color(strip_bed, led_bed_color, breath_level(now));
 
     for (uint16_t i = 0; i < LED_COUNT_BED; ++i) {
-        stripBed.setPixelColor(i, whiteColor);
+        strip_bed.setPixelColor(i, color);
     }
-
-    stripBed.show();
+    strip_bed.show();
 }
 
 void handle_pulse_interrupt()
 {
-    if (!pulseInterruptFlag) {
+    if (!pulse_interrupt_flag) {
         return;
     }
 
     noInterrupts();
-    pulseInterruptFlag = false;
+    pulse_interrupt_flag = false;
     interrupts();
 
     const unsigned long now = millis();
-
-    if (now - lastPulseHandled < PULSE_DEBOUNCE_TIME) {
+    if (now - last_pulse_handled < PULSE_DEBOUNCE_TIME) {
         return;
     }
 
-    lastPulseHandled = now;
-
-    diagLed.setPixelColor(0, diagLed.Color(255, 255, 255));
-    diagLed.show();
-    diagLedOffTime = now + 50;
-
-    // Fizyczny impuls przełącza tylko ledshelf. LED_BED pozostaje niezależny.
-    set_led_shelf_enabled(!led_shelfActive);
+    last_pulse_handled = now;
+    diag_led.setPixelColor(0, diag_led.Color(255, 255, 255));
+    diag_led.show();
+    diag_led_off_time = now + 50;
+    set_led_shelf_enabled(!led_shelf_active);
 }
 
 void update_diag_led()
 {
-    if (diagLedOffTime > 0 && millis() >= diagLedOffTime) {
-        diagLed.clear();
-        diagLed.show();
-        diagLedOffTime = 0;
+    if (diag_led_off_time > 0 && millis() >= diag_led_off_time) {
+        diag_led.clear();
+        diag_led.show();
+        diag_led_off_time = 0;
     }
 }
 
@@ -168,386 +223,382 @@ void smart_delay(unsigned long ms)
     const unsigned long start = millis();
 
     while (millis() - start < ms) {
+        const unsigned long now = millis();
         handle_pulse_interrupt();
         update_diag_led();
-        update_bed_led();
+        update_bed_led(now);
 
-        if (!led_shelfActive) {
+        if (!led_shelf_active) {
             return;
         }
     }
 }
 
-uint32_t wheel(byte wheel_pos)
+uint32_t wheel(byte position)
 {
-    if (wheel_pos < 85) {
-        return strip1.Color(wheel_pos * 3, 255 - wheel_pos * 3, 0);
+    if (position < 85) {
+        return strip_shelf.Color(position * 3, 255 - position * 3, 0);
     }
-    if (wheel_pos < 170) {
-        wheel_pos -= 85;
-        return strip1.Color(255 - wheel_pos * 3, 0, wheel_pos * 3);
+    if (position < 170) {
+        position -= 85;
+        return strip_shelf.Color(255 - position * 3, 0, position * 3);
     }
 
-    wheel_pos -= 170;
-    return strip1.Color(0, wheel_pos * 3, 255 - wheel_pos * 3);
+    position -= 170;
+    return strip_shelf.Color(0, position * 3, 255 - position * 3);
 }
 
 void effect_comet()
 {
-    static int pos = 0;
     constexpr int tail = 5;
-
-    strip1.clear();
+    strip_shelf.clear();
 
     for (int t = 0; t < tail; ++t) {
-        const int idx = (pos - t + LED_COUNT) % LED_COUNT;
-
-        if (t == 0) {
-            set_pixel(idx, hot_gold());
-        }
-        else {
-            const uint8_t bright = 255 - t * (255 / tail);
-            set_pixel(idx, strip1.Color(bright, 0, 0));
-        }
+        const int index = (comet_pos - t + LED_COUNT) % LED_COUNT;
+        const uint8_t value = 255 - t * (255 / tail);
+        set_pixel(index, t == 0 ? hot_gold() : strip_shelf.Color(value, 0, 0));
     }
 
-    strip1.show();
+    strip_shelf.show();
     smart_delay(50);
-    pos = (pos + 1) % LED_COUNT;
+    comet_pos = (comet_pos + 1) % LED_COUNT;
 }
 
 void effect_rainbow()
 {
-    static uint8_t j = 0;
-
     for (uint16_t i = 0; i < LED_COUNT; ++i) {
-        set_pixel(i, wheel((i * 256 / LED_COUNT + j) & 255));
+        set_pixel(i, wheel((i * 256 / LED_COUNT + rainbow_offset) & 255));
     }
 
-    strip1.show();
-    ++j;
+    strip_shelf.show();
+    ++rainbow_offset;
     smart_delay(20);
 }
 
 void effect_reactor_gate()
 {
     constexpr int tail = 4;
-    constexpr int maxStep = LED_COUNT / 2;
+    constexpr int max_step = LED_COUNT / 2;
 
-    if (gateStage == 0) {
-        strip1.clear();
-
-        const int leftHead = gateStep;
-        const int rightHead = LED_COUNT - 1 - gateStep;
+    if (gate_stage == 0) {
+        strip_shelf.clear();
+        const int left_head = gate_step;
+        const int right_head = LED_COUNT - 1 - gate_step;
 
         for (int t = 0; t < tail; ++t) {
-            const int leftIdx = leftHead - t;
-            const int rightIdx = rightHead + t;
-
-            if (leftIdx >= 0 && leftIdx < LED_COUNT) {
-                if (t == 0) set_pixel(leftIdx, hot_gold());
-                else if (t == 1) set_pixel(leftIdx, iron_red());
-                else set_pixel(leftIdx, strip1.Color(150 - t * 30, 0, 0));
-            }
-
-            if (rightIdx >= 0 && rightIdx < LED_COUNT) {
-                if (t == 0) set_pixel(rightIdx, hot_gold());
-                else if (t == 1) set_pixel(rightIdx, iron_red());
-                else set_pixel(rightIdx, strip1.Color(150 - t * 30, 0, 0));
-            }
+            const int left = left_head - t;
+            const int right = right_head + t;
+            const uint32_t color = t == 0 ? hot_gold() :
+                                   t == 1 ? iron_red() :
+                                   strip_shelf.Color(150 - t * 30, 0, 0);
+            set_pixel(left, color);
+            set_pixel(right, color);
         }
 
-        strip1.show();
+        strip_shelf.show();
         smart_delay(65);
 
-        ++gateStep;
-        if (gateStep >= maxStep) {
-            gateStage = 1;
-            gateFade = 0;
+        if (++gate_step >= max_step) {
+            gate_stage = 1;
+            gate_fade = 0;
         }
     }
-    else if (gateStage == 1) {
-        const int fade = min(gateFade, 255);
-        const uint8_t r = 255;
-        const uint8_t g = 80 + ((175 * fade) / 255);
-        const uint8_t b = fade;
-
-        set_all(strip1.Color(r, g, b));
-
-        const int c1 = (LED_COUNT - 1) / 2;
-        const int c2 = LED_COUNT / 2;
-        set_pixel(c1, arc_white());
-        set_pixel(c2, arc_white());
-
-        strip1.show();
+    else if (gate_stage == 1) {
+        const int fade = min(gate_fade, 255);
+        set_all(strip_shelf.Color(255, 80 + ((175 * fade) / 255), fade));
+        set_pixel((LED_COUNT - 1) / 2, arc_white());
+        set_pixel(LED_COUNT / 2, arc_white());
+        strip_shelf.show();
         smart_delay(30);
 
-        gateFade += 15;
-        if (gateFade >= 255) {
-            gateStage = 2;
-            gateHold = 0;
+        gate_fade += 15;
+        if (gate_fade >= 255) {
+            gate_stage = 2;
+            gate_hold = 0;
         }
     }
     else {
-        set_all(strip1.Color(120, 220, 255));
-        strip1.show();
+        set_all(strip_shelf.Color(120, 220, 255));
+        strip_shelf.show();
         smart_delay(80);
 
-        ++gateHold;
-        if (gateHold >= 4) {
-            next_mode();
+        if (++gate_hold >= 4) {
+            gate_stage = 0;
+            gate_step = 0;
+            gate_fade = 0;
+            gate_hold = 0;
         }
     }
 }
 
 void effect_arc_reactor()
 {
-    static int brightness = 25;
-    static int dir = 4;
-
-    const uint8_t r = brightness / 5;
-    const uint8_t g = brightness;
-    const uint8_t b = brightness;
-    set_all(strip1.Color(r, g, b));
-
-    const int c1 = (LED_COUNT - 1) / 2;
-    const int c2 = LED_COUNT / 2;
-    set_pixel(c1, strip1.Color(brightness / 2, brightness, 255));
-    set_pixel(c2, strip1.Color(brightness / 2, brightness, 255));
-
-    strip1.show();
+    set_all(strip_shelf.Color(arc_brightness / 5, arc_brightness, arc_brightness));
+    set_pixel((LED_COUNT - 1) / 2,
+              strip_shelf.Color(arc_brightness / 2, arc_brightness, 255));
+    set_pixel(LED_COUNT / 2,
+              strip_shelf.Color(arc_brightness / 2, arc_brightness, 255));
+    strip_shelf.show();
     smart_delay(35);
 
-    brightness += dir;
-    if (brightness >= 210 || brightness <= 25) {
-        dir = -dir;
-        brightness = constrain(brightness, 25, 210);
+    arc_brightness += arc_dir;
+    if (arc_brightness >= 210 || arc_brightness <= 25) {
+        arc_dir = -arc_dir;
+        arc_brightness = constrain(arc_brightness, 25, 210);
     }
 }
 
 void effect_repulsor_charge()
 {
-    const int leftCenter = (LED_COUNT - 1) / 2;
-    const int rightCenter = LED_COUNT / 2;
-    const int maxRadius = LED_COUNT / 2;
+    const int left_center = (LED_COUNT - 1) / 2;
+    const int right_center = LED_COUNT / 2;
 
-    if (repPhase == 0) {
+    if (rep_phase == 0) {
         set_all(dark_red());
-
-        for (int r = 0; r <= repRadius; ++r) {
-            set_pixel(leftCenter - r, gold());
-            set_pixel(rightCenter + r, gold());
+        for (int radius = 0; radius <= rep_radius; ++radius) {
+            set_pixel(left_center - radius, gold());
+            set_pixel(right_center + radius, gold());
         }
-
-        set_pixel(leftCenter, arc_white());
-        set_pixel(rightCenter, arc_white());
-
-        strip1.show();
+        set_pixel(left_center, arc_white());
+        set_pixel(right_center, arc_white());
+        strip_shelf.show();
         smart_delay(85);
 
-        ++repRadius;
-        if (repRadius > maxRadius) {
-            repPhase = 1;
-            repFlash = 0;
+        if (++rep_radius > LED_COUNT / 2) {
+            rep_phase = 1;
+            rep_flash = 0;
         }
     }
-    else if (repPhase == 1) {
+    else if (rep_phase == 1) {
         set_all(arc_blue());
-        strip1.show();
+        strip_shelf.show();
         smart_delay(75);
 
-        ++repFlash;
-        if (repFlash >= 5) {
-            repPhase = 2;
-            repFade = 255;
+        if (++rep_flash >= 5) {
+            rep_phase = 2;
+            rep_fade = 255;
         }
     }
     else {
-        set_all(strip1.Color(repFade, repFade / 5, 0));
-        strip1.show();
+        set_all(strip_shelf.Color(rep_fade, rep_fade / 5, 0));
+        strip_shelf.show();
         smart_delay(35);
 
-        repFade -= 18;
-        if (repFade <= 45) {
-            repPhase = 0;
-            repRadius = 0;
-            repFlash = 0;
-            repFade = 255;
+        rep_fade -= 18;
+        if (rep_fade <= 45) {
+            rep_phase = 0;
+            rep_radius = 0;
+            rep_flash = 0;
+            rep_fade = 255;
         }
     }
 }
 
 void effect_suit_boot_up()
 {
-    if (bootPhase == 0) {
-        strip1.clear();
-
+    if (boot_phase == 0) {
+        strip_shelf.clear();
         for (int i = 0; i < LED_COUNT; ++i) {
-            if (i < bootStep) {
+            if (i < boot_step) {
                 set_pixel(i, iron_red());
             }
         }
-
-        if (bootStep < LED_COUNT) {
-            set_pixel(bootStep, hot_gold());
+        if (boot_step < LED_COUNT) {
+            set_pixel(boot_step, hot_gold());
         }
-
-        strip1.show();
+        strip_shelf.show();
         smart_delay(80);
 
-        ++bootStep;
-        if (bootStep > LED_COUNT) {
-            bootPhase = 1;
-            bootStep = 0;
+        if (++boot_step > LED_COUNT) {
+            boot_phase = 1;
+            boot_step = 0;
         }
     }
-    else if (bootPhase == 1) {
+    else if (boot_phase == 1) {
         set_all(iron_red());
-
-        const int scan = bootStep;
-        set_pixel(scan, arc_white());
-        set_pixel(scan - 1, hot_gold());
-        set_pixel(scan - 2, gold());
-
-        strip1.show();
+        set_pixel(boot_step, arc_white());
+        set_pixel(boot_step - 1, hot_gold());
+        set_pixel(boot_step - 2, gold());
+        strip_shelf.show();
         smart_delay(55);
 
-        ++bootStep;
-        if (bootStep >= LED_COUNT + 3) {
-            bootPhase = 2;
-            bootFlash = 0;
+        if (++boot_step >= LED_COUNT + 3) {
+            boot_phase = 2;
+            boot_flash = 0;
         }
     }
     else {
         set_all(iron_red());
-        strip1.show();
+        strip_shelf.show();
         smart_delay(90);
 
-        ++bootFlash;
-        if (bootFlash >= 4) {
-            bootPhase = 0;
-            bootStep = 0;
-            bootFlash = 0;
+        if (++boot_flash >= 4) {
+            boot_phase = 0;
+            boot_step = 0;
+            boot_flash = 0;
         }
     }
+}
+
+void effect_breath()
+{
+    set_all(scaled_color(strip_shelf, led_bed_color, breath_level(millis())));
+    strip_shelf.show();
+    smart_delay(BED_FRAME_MS);
 }
 
 } // namespace
 
 void leds_init()
 {
-    diagLed.begin();
-    diagLed.clear();
-    diagLed.show();
+    diag_led.begin();
+    diag_led.clear();
+    diag_led.show();
 
-    strip1.begin();
-    strip1.setBrightness(led_shelf_brightness);
+    strip_shelf.begin();
+    strip_shelf.setBrightness(led_shelf_brightness);
     clear_led_shelf();
 
-    stripBed.begin();
-    stripBed.setBrightness(led_bed_brightness);
+    strip_bed.begin();
+    strip_bed.setBrightness(led_bed_brightness);
     clear_led_bed();
 
-    lastChange = millis();
+    last_effect_change = millis();
+    const int interrupt_number = digitalPinToInterrupt(PULSE_PIN);
 
-    const int interruptNumber = digitalPinToInterrupt(PULSE_PIN);
-    if (interruptNumber == NOT_AN_INTERRUPT) {
-        Serial.println("UWAGA: PULSE_PIN nie obsluguje attachInterrupt().");
+    if (interrupt_number == NOT_AN_INTERRUPT) {
+        Serial.println("PULSE_PIN does not support interrupts.");
     }
     else {
-        attachInterrupt(interruptNumber, pulse_isr, RISING);
-        Serial.println("Przerwanie PULSE_PIN aktywne.");
+        attachInterrupt(interrupt_number, pulse_isr, RISING);
     }
 }
 
 void leds_loop()
 {
+    const unsigned long now = millis();
     handle_pulse_interrupt();
     update_diag_led();
-    update_bed_led();
+    update_bed_led(now);
 
-    if (!led_shelfActive) {
+    if (!led_shelf_active) {
         return;
     }
 
-    const unsigned long now = millis();
-    if (now - lastChange > MODE_TIME) {
-        next_mode();
+    if (now - last_effect_change >= current_effect_time_ms()) {
+        next_effect();
     }
 
-    switch (mode) {
-        case 0: effect_comet(); break;
-        case 1: effect_rainbow(); break;
-        case 2: effect_reactor_gate(); break;
-        case 3: effect_arc_reactor(); break;
-        case 4: effect_repulsor_charge(); break;
-        case 5: effect_suit_boot_up(); break;
+    switch (current_effect) {
+        case ShelfEffect::COMET: effect_comet(); break;
+        case ShelfEffect::RAINBOW: effect_rainbow(); break;
+        case ShelfEffect::REACTOR_GATE: effect_reactor_gate(); break;
+        case ShelfEffect::ARC_REACTOR: effect_arc_reactor(); break;
+        case ShelfEffect::REPULSOR_CHARGE: effect_repulsor_charge(); break;
+        case ShelfEffect::SUIT_BOOT: effect_suit_boot_up(); break;
+        case ShelfEffect::BREATH: effect_breath(); break;
+        case ShelfEffect::COUNT: break;
     }
 }
 
 void set_led_shelf_enabled(bool enabled)
 {
-    if (led_shelfActive == enabled) {
+    if (led_shelf_active == enabled) {
         return;
     }
 
-    led_shelfActive = enabled;
-
-    if (!led_shelfActive) {
+    led_shelf_active = enabled;
+    if (!enabled) {
         clear_led_shelf();
     }
     else {
-        lastChange = millis();
+        last_effect_change = millis();
         reset_effect_states();
     }
 }
 
 void set_led_bed_enabled(bool enabled)
 {
-    if (led_bedActive == enabled) {
+    if (led_bed_active == enabled) {
         return;
     }
 
-    led_bedActive = enabled;
-
-    if (!led_bedActive) {
+    led_bed_active = enabled;
+    if (!enabled) {
         clear_led_bed();
     }
+    else {
+        last_bed_frame = 0;
+    }
+}
+
+bool is_led_shelf_enabled() { return led_shelf_active; }
+bool is_led_bed_enabled() { return led_bed_active; }
+
+void set_led_shelf_brightness(uint8_t brightness)
+{
+    led_shelf_brightness = brightness;
+    strip_shelf.setBrightness(brightness);
 }
 
 void set_led_bed_brightness(uint8_t brightness)
 {
     led_bed_brightness = brightness;
-    stripBed.setBrightness(led_bed_brightness);
+    strip_bed.setBrightness(brightness);
 }
 
-void set_led_shelf_brightness(uint8_t brightness)
+uint8_t get_led_shelf_brightness() { return led_shelf_brightness; }
+uint8_t get_led_bed_brightness() { return led_bed_brightness; }
+
+void set_led_bed_color(uint32_t rgb) { led_bed_color = rgb & 0xFFFFFF; }
+uint32_t get_led_bed_color() { return led_bed_color; }
+
+void set_breath_period_s(uint8_t seconds)
 {
-    led_shelf_brightness = brightness;
-    strip1.setBrightness(led_shelf_brightness);
+    breath_period_s = seconds > 10 ? 10 : seconds;
 }
 
-uint8_t get_led_shelf_brightness()
+uint8_t get_breath_period_s() { return breath_period_s; }
+
+bool set_shelf_effect_enabled(ShelfEffect effect, bool enabled)
 {
-    return led_shelf_brightness;
+    const uint8_t index = effect_index(effect);
+    if (index >= SHELF_EFFECT_COUNT) {
+        return false;
+    }
+    if (effect_enabled[index] == enabled) {
+        return true;
+    }
+    if (!enabled && enabled_effect_count() == 1) {
+        return false;
+    }
+
+    effect_enabled[index] = enabled;
+    if (!enabled && current_effect == effect) {
+        next_effect();
+    }
+    return true;
 }
 
-uint8_t get_led_bed_brightness()
+bool is_shelf_effect_enabled(ShelfEffect effect)
 {
-    return led_bed_brightness;
+    const uint8_t index = effect_index(effect);
+    return index < SHELF_EFFECT_COUNT && effect_enabled[index];
 }
 
-bool is_led_shelf_enabled()
-{
-    return led_shelfActive;
-}
+ShelfEffect get_current_shelf_effect() { return current_effect; }
 
-bool is_led_bed_enabled()
+const char* get_shelf_effect_name(ShelfEffect effect)
 {
-    return led_bedActive;
-}
-
-bool is_led_controller_enabled()
-{
-    return led_controllerActive;
+    switch (effect) {
+        case ShelfEffect::COMET: return "comet";
+        case ShelfEffect::RAINBOW: return "rainbow";
+        case ShelfEffect::REACTOR_GATE: return "reactor_gate";
+        case ShelfEffect::ARC_REACTOR: return "arc_reactor";
+        case ShelfEffect::REPULSOR_CHARGE: return "repulsor_charge";
+        case ShelfEffect::SUIT_BOOT: return "suit_boot";
+        case ShelfEffect::BREATH: return "breath";
+        case ShelfEffect::COUNT: return "unknown";
+    }
+    return "unknown";
 }
